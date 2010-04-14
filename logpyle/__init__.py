@@ -1,11 +1,28 @@
 #!/usr/bin/env python
 
-import sys
+#
+# Emulate the logging module
+#
 
-# Attempt to import systemwide configuration
+import logging
+__all__ = logging.__all__
+
+#
+# Systemwide logpyle configuration
+#
+# The defaults module imports the user-level config module which
+# is called `logpyle_config`
+#
+
 import defaults as config
 
-# Logger identification
+#
+# Module identification
+#
+# Attempt to discover the identity of our parent module and use
+# it as our logger name
+#
+
 import traceback
 try:
     # Grab parent module if we can
@@ -14,8 +31,7 @@ except:
     # Otherwise use our own name
     name = traceback.extract_stack()[-1][0]
 
-print '__name__', __name__
-print 'name', name
+# Logger setup
 
 from logging import *
 from logging import getLogger
@@ -38,47 +54,108 @@ error = _logger().error
 critical = _logger().critical
 log = _logger().log
 
-# Somebody subverted the excepthook already
-if sys.excepthook != sys.__excepthook__:
-    pass
 
-def excepthook(*args):
-    _logger().error(traceback.format_exception(*args))
-    sys.__excepthook__(*args)
+import sys
 
-sys.excepthook = excepthook
+#
+# Exception hook
+#
+# Log errors
+#
 
-#try:
-#    from cStringIO import StringIO
-#except:
-#    from StringIO import StringIO
-from StringIO import StringIO
+if config.SUBVERT_EXCEPTHOOK:
 
-class StreamSubverter (StringIO):
+    # Somebody subverted the excepthook already!
+    # We'll just stomp on them for now.
+    if sys.excepthook != sys.__excepthook__:
+        pass
 
-    def __init__(self, stream = sys.stdout, logfunc = info, *args, **kwargs):
-        self.stream = stream
-        self.logfunc = logfunc
-        self.stream.write('\nWAKA -- INIT\n')
-        return StringIO.__init__(self, *args, **kwargs)
+    def excepthook(*args):
+        _logger().error(
+            repr(
+                ''.join(
+                    traceback.format_exception(*args)
+                )
+            )
+        )
+        sys.__excepthook__(*args)
 
-    def flush(self, *args, **kwargs):
-        self.stream.flush()
-        return StringIO.flush(self, *args, **kwargs)
+    sys.excepthook = excepthook
 
-    def write(self, *args, **kwargs):
-        message = self.read()
-        self.logfunc(message)
-        self.stream.write(message)
-        self.stream.write('\nWAKA!\n')
-        return StringIO.write(self, *args, **kwargs)
+#
+# stdout/stderr subversion
+#
+# We want to grab everything the program sends and automatically
+# log it. Controlled by various config variables.
+#
+# Decision: capture sys.stdout and sys.stderr rather than being
+# being clever with dup2 at the moment because that may have
+# some unintended consequences. Can revisit this if performance
+# becomes an issue (users can also turn feature off).
+#
+
+if config.SUBVERT_IO:
+
+    # No cStringIO here because we need to subclass it
+    from StringIO import StringIO
+
+    class StreamSubverter (StringIO):
+
+        def __init__(
+            self, 
+            stream = sys.stdout, 
+            loglevel = info, 
+            *args, 
+            **kwargs
+        ):
+            self.stream = stream
+            self.loglevel = loglevel
+            return StringIO.__init__(self, *args, **kwargs)
+
+        def flush(self, *args, **kwargs):
+
+            # Grab the message we've built up so far
+            message = StringIO.seek(self, 0)
+            message = StringIO.read(self)
+
+            # And erase the buffer
+            StringIO.seek(self, 0)
+            StringIO.truncate(self)
+
+            # Now log all of the lines we've built up
+            for line in message.strip('\n').split('\n'):
+                log(self.loglevel, line)
+
+            # And echo out the lines to the subvertee
+            self.stream.write(message)
+            self.stream.flush()
+
+        def write(self, message, *args, **kwargs):
+
+            # Make sure we are dealing with strings
+            if not isinstance(message, basestring):
+                message = str(message)
+
+            # Buffer the write we got for flush later
+            StringIO.write(self, message)
+
+            # Right now, flush according to the simple rule
+            # that every newline triggers a flush
+            if message.endswith('\n'):
+                self.flush()
         
-_stdout = sys.stdout
-out = StreamSubverter(_stdout, logfunc = info)
-sys.stdout = out
+        def close(self):
+            
+            # Make sure we git rid of buffered data if we're closing
+            self.stream.flush()
+            StringIO.close(self)
 
-_stderr = sys.stderr
-err = StreamSubverter(_stderr, logfunc = error)
-sys.stderr = err
+    # Do the dirty work
+    _stdout = sys.stdout
+    out = StreamSubverter(_stdout, loglevel = config.STDOUT_LEVEL)
+    sys.stdout = out
 
-print >>sys.stderr, "Hello!"
+    _stderr = sys.stderr
+    err = StreamSubverter(_stderr, loglevel = config.STDERR_LEVEL)
+    sys.stderr = err
+
